@@ -2,169 +2,202 @@ package main
 
 import (
 	"fmt"
-	"image"
-	"image/color"
 	"log"
-	"os"
-	"time"
+	"runtime"
+	"strings"
 
-	"github.com/jezek/xgb"
-	"github.com/jezek/xgb/xproto"
+	"github.com/go-gl/gl/v4.1-core/gl"
+	"github.com/go-gl/glfw/v3.3/glfw"
+	"github.com/go-gl/mathgl/mgl32"
 )
 
 const (
 	width  = 800
 	height = 600
+	title  = "Craft3D (OpenGL)"
+)
+
+var (
+	vertexShaderSource = `
+		#version 410
+		in vec3 vp;
+		uniform mat4 mvp;
+		void main() {
+			gl_Position = mvp * vec4(vp, 1.0);
+		}
+	` + "\x00"
+
+	fragmentShaderSource = `
+		#version 410
+		out vec4 frag_colour;
+		void main() {
+			frag_colour = vec4(1, 1, 0, 1); // Yellow
+		}
+	` + "\x00"
+)
+
+var (
+	cubeVertices = []float32{
+		// Front face
+		-0.5, -0.5, 0.5,
+		0.5, -0.5, 0.5,
+		0.5, 0.5, 0.5,
+		-0.5, 0.5, 0.5,
+		// Back face
+		-0.5, -0.5, -0.5,
+		0.5, -0.5, -0.5,
+		0.5, 0.5, -0.5,
+		-0.5, 0.5, -0.5,
+	}
+
+	// Indices for drawing cube edges (wireframe)
+	cubeIndices = []uint32{
+		0, 1, 1, 2, 2, 3, 3, 0, // Front face
+		4, 5, 5, 6, 6, 7, 7, 4, // Back face
+		0, 4, 1, 5, 2, 6, 3, 7, // Connecting lines
+	}
 )
 
 func main() {
-	// Connect to the X server (env var DISPLAY)
-	X, err := xgb.NewConn()
+	runtime.LockOSThread()
+
+	if err := glfw.Init(); err != nil {
+		log.Fatalln("failed to initialize glfw:", err)
+	}
+	defer glfw.Terminate()
+
+	glfw.WindowHint(glfw.Resizable, glfw.False)
+	glfw.WindowHint(glfw.ContextVersionMajor, 4)
+	glfw.WindowHint(glfw.ContextVersionMinor, 1)
+	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
+	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True)
+
+	window, err := glfw.CreateWindow(width, height, title, nil, nil)
 	if err != nil {
-		log.Fatalf("Cannot connect to X server: %v", err)
+		panic(err)
 	}
-	defer X.Close()
+	window.MakeContextCurrent()
 
-	// Get the setup info (root window, screens, etc)
-	setup := xproto.Setup(X)
-	screen := setup.DefaultScreen(X)
-
-	// Create a Window ID
-	wid, _ := xproto.NewWindowId(X)
-
-	// Create the window
-	xproto.CreateWindow(X, screen.RootDepth, wid, screen.Root,
-		0, 0, uint16(width), uint16(height), 0,
-		xproto.WindowClassInputOutput, screen.RootVisual,
-		xproto.CwBackPixel|xproto.CwEventMask,
-		[]uint32{
-			0xffffffff, // White background
-			xproto.EventMaskStructureNotify | xproto.EventMaskKeyPress, // Listen for map notify and keys
-		})
-
-	// Create a Graphics Context (GC) for drawing
-	gc, _ := xproto.NewGcontextId(X)
-	xproto.CreateGC(X, gc, xproto.Drawable(wid), 0, nil)
-
-	// Map (show) the window
-	xproto.MapWindow(X, wid)
-
-	// Set window title
-	title := "Craft3D (Software Rasterizer)"
-	xproto.ChangeProperty(X, xproto.PropModeReplace, wid, xproto.AtomWmName, xproto.AtomString, 8, uint32(len(title)), []byte(title))
-
-	// Create a software framebuffer (RGBA image)
-	fb := image.NewRGBA(image.Rect(0, 0, width, height))
-
-	fmt.Println("Window created! Press ESC or 'q' to quit.")
-
-	// Channel to handle X events without blocking the render loop
-	events := make(chan xgb.Event)
-	go func() {
-		for {
-			ev, err := X.WaitForEvent()
-			if err != nil {
-				log.Printf("Error waiting for event: %v", err)
-				continue
-			}
-			if ev == nil {
-				log.Println("Connection closed")
-				os.Exit(0)
-			}
-			events <- ev
-		}
-	}()
-
-	ticker := time.NewTicker(16 * time.Millisecond) // ~60 FPS
-	defer ticker.Stop()
-
-	// --- 3D SETUP ---
-	// Define the 8 vertices of a cube
-	cubeVertices := []Vec3{
-		{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
-		{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1},
+	if err := gl.Init(); err != nil {
+		panic(err)
 	}
 
-	// Define the 12 edges (indices into vertices)
-	edges := [][2]int{
-		{0, 1}, {1, 2}, {2, 3}, {3, 0}, // Back face
-		{4, 5}, {5, 6}, {6, 7}, {7, 4}, // Front face
-		{0, 4}, {1, 5}, {2, 6}, {3, 7}, // Connecting lines
+	version := gl.GoStr(gl.GetString(gl.VERSION))
+	fmt.Println("OpenGL version", version)
+
+	// Compile Shaders
+	program, err := newProgram(vertexShaderSource, fragmentShaderSource)
+	if err != nil {
+		panic(err)
+	}
+	gl.UseProgram(program)
+
+	// Uniforms
+	mvpUniform := gl.GetUniformLocation(program, gl.Str("mvp\x00"))
+
+	// VAO / VBO / EBO
+	var vao uint32
+	gl.GenVertexArrays(1, &vao)
+	gl.BindVertexArray(vao)
+
+	var vbo uint32
+	gl.GenBuffers(1, &vbo)
+	gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
+	gl.BufferData(gl.ARRAY_BUFFER, len(cubeVertices)*4, gl.Ptr(cubeVertices), gl.STATIC_DRAW)
+
+	var ebo uint32
+	gl.GenBuffers(1, &ebo)
+	gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo)
+	gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(cubeIndices)*4, gl.Ptr(cubeIndices), gl.STATIC_DRAW)
+
+	vertAttrib := uint32(gl.GetAttribLocation(program, gl.Str("vp\x00")))
+	gl.EnableVertexAttribArray(vertAttrib)
+	gl.VertexAttribPointer(vertAttrib, 3, gl.FLOAT, false, 0, gl.PtrOffset(0))
+
+	// Global settings
+	gl.Enable(gl.DEPTH_TEST)
+	gl.DepthFunc(gl.LESS)
+	gl.ClearColor(0.1, 0.1, 0.1, 1.0)
+
+	// Projection Matrix
+	projection := mgl32.Perspective(mgl32.DegToRad(45.0), float32(width)/float32(height), 0.1, 100.0)
+	camera := mgl32.LookAtV(mgl32.Vec3{3, 3, 3}, mgl32.Vec3{0, 0, 0}, mgl32.Vec3{0, 1, 0})
+
+	angle := 0.0
+
+	for !window.ShouldClose() {
+		gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+
+		gl.UseProgram(program)
+
+		// Rotate Cube
+		angle += 0.01
+		model := mgl32.HomogRotate3D(float32(angle), mgl32.Vec3{0, 1, 0}).Mul4(mgl32.HomogRotate3D(float32(angle)*0.5, mgl32.Vec3{1, 0, 0}))
+
+		mvp := projection.Mul4(camera).Mul4(model)
+		gl.UniformMatrix4fv(mvpUniform, 1, false, &mvp[0])
+
+		gl.BindVertexArray(vao)
+		gl.DrawElements(gl.LINES, int32(len(cubeIndices)), gl.UNSIGNED_INT, gl.PtrOffset(0))
+
+		window.SwapBuffers()
+		glfw.PollEvents()
+	}
+}
+
+func newProgram(vertexShaderSource, fragmentShaderSource string) (uint32, error) {
+	vertexShader, err := compileShader(vertexShaderSource, gl.VERTEX_SHADER)
+	if err != nil {
+		return 0, err
 	}
 
-	angleX, angleY, angleZ := 0.0, 0.0, 0.0
-	// ----------------
-
-	for {
-		select {
-		case ev := <-events:
-			switch e := ev.(type) {
-			case xproto.KeyPressEvent:
-				if e.Detail == 9 || e.Detail == 24 {
-					os.Exit(0)
-				}
-			case xproto.MapNotifyEvent:
-				fmt.Println("Window mapped!")
-			}
-
-		case <-ticker.C:
-			// Update angles
-			angleX += 0.01
-			angleY += 0.015
-			angleZ += 0.005
-
-			// --- RENDER START ---
-
-			// Clear background to black
-			for i := 0; i < len(fb.Pix); i += 4 {
-				fb.Pix[i] = 0
-				fb.Pix[i+1] = 0
-				fb.Pix[i+2] = 0
-				fb.Pix[i+3] = 255
-			}
-
-			// Project and Draw Cube
-			var projectedPoints [8]struct{ x, y int }
-
-			// 1. Rotate and Project all vertices
-			for i, v := range cubeVertices {
-				rotated := v.RotateX(angleX).RotateY(angleY).RotateZ(angleZ)
-				// Scale for visibility
-				rotated.X *= 100
-				rotated.Y *= 100
-				rotated.Z *= 100
-
-				x, y := rotated.Project(width, height, 400, 400) // fov=400, dist=400
-				projectedPoints[i] = struct{ x, y int }{x, y}
-			}
-
-			// 2. Draw Edges
-			lineColor := color.RGBA{255, 255, 0, 255} // Yellow lines
-			for _, edge := range edges {
-				p1 := projectedPoints[edge[0]]
-				p2 := projectedPoints[edge[1]]
-				DrawLine(fb, p1.x, p1.y, p2.x, p2.y, lineColor)
-			}
-
-			// --- RENDER END ---
-
-			// Blit the framebuffer to the window using PutImage
-			// X11 has a maximum request size (often 256KB).
-			// Our buffer is 800*600*4 = ~1.9MB.
-			// We MUST split the sending into smaller chunks (batches of rows).
-			batchHeight := 50 // 800 * 50 * 4 = 160KB < 256KB
-			for batchY := 0; batchY < height; batchY += batchHeight {
-				h := batchHeight
-				if batchY+h > height {
-					h = height - batchY
-				}
-
-				start := fb.PixOffset(0, batchY)
-				end := fb.PixOffset(0, batchY+h)
-
-				xproto.PutImage(X, xproto.ImageFormatZPixmap, xproto.Drawable(wid), gc,
-					uint16(width), uint16(h), 0, int16(batchY), 0, screen.RootDepth, fb.Pix[start:end])
-			}
-		}
+	fragmentShader, err := compileShader(fragmentShaderSource, gl.FRAGMENT_SHADER)
+	if err != nil {
+		return 0, err
 	}
+
+	program := gl.CreateProgram()
+	gl.AttachShader(program, vertexShader)
+	gl.AttachShader(program, fragmentShader)
+	gl.LinkProgram(program)
+
+	var status int32
+	gl.GetProgramiv(program, gl.LINK_STATUS, &status)
+	if status == gl.FALSE {
+		var logLength int32
+		gl.GetProgramiv(program, gl.INFO_LOG_LENGTH, &logLength)
+
+		log := strings.Repeat("\x00", int(logLength+1))
+		gl.GetProgramInfoLog(program, logLength, nil, gl.Str(log))
+
+		return 0, fmt.Errorf("failed to link program: %v", log)
+	}
+
+	gl.DeleteShader(vertexShader)
+	gl.DeleteShader(fragmentShader)
+
+	return program, nil
+}
+
+func compileShader(source string, shaderType uint32) (uint32, error) {
+	shader := gl.CreateShader(shaderType)
+
+	csources, free := gl.Strs(source)
+	gl.ShaderSource(shader, 1, csources, nil)
+	free()
+	gl.CompileShader(shader)
+
+	var status int32
+	gl.GetShaderiv(shader, gl.COMPILE_STATUS, &status)
+	if status == gl.FALSE {
+		var logLength int32
+		gl.GetShaderiv(shader, gl.INFO_LOG_LENGTH, &logLength)
+
+		log := strings.Repeat("\x00", int(logLength+1))
+		gl.GetShaderInfoLog(shader, logLength, nil, gl.Str(log))
+
+		return 0, fmt.Errorf("failed to compile %v: %v", source, log)
+	}
+
+	return shader, nil
 }
