@@ -3,11 +3,11 @@
 ## Done
 
 * Basic scaffold
+* Crear una ventana
+* Iniciar sistema 3D
 
 ## ToDo
 
-* Crear una ventana
-* Iniciar sistema 3D
 * Pintar un cubo animada
 * Interactuar con el cubo
 
