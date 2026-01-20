@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"image"
+	"image/color"
 	"log"
 	"runtime"
 	"strings"
@@ -21,41 +23,77 @@ var (
 	vertexShaderSource = `
 		#version 410
 		in vec3 vp;
+		in vec2 vertTexCoord;
+		out vec2 fragTexCoord;
 		uniform mat4 mvp;
 		void main() {
+			fragTexCoord = vertTexCoord;
 			gl_Position = mvp * vec4(vp, 1.0);
 		}
 	` + "\x00"
 
 	fragmentShaderSource = `
 		#version 410
+		in vec2 fragTexCoord;
 		out vec4 frag_colour;
+		uniform sampler2D tex;
 		void main() {
-			frag_colour = vec4(1, 1, 0, 1); // Yellow
+			frag_colour = texture(tex, fragTexCoord);
 		}
 	` + "\x00"
 )
 
-var (
-	cubeVertices = []float32{
-		// Front face
-		-0.5, -0.5, 0.5,
-		0.5, -0.5, 0.5,
-		0.5, 0.5, 0.5,
-		-0.5, 0.5, 0.5,
-		// Back face
-		-0.5, -0.5, -0.5,
-		0.5, -0.5, -0.5,
-		0.5, 0.5, -0.5,
-		-0.5, 0.5, -0.5,
-	}
+// X, Y, Z, U, V
+var cubeVertices = []float32{
+	// Front face
+	-0.5, -0.5, 0.5, 0.0, 0.0,
+	0.5, -0.5, 0.5, 1.0, 0.0,
+	0.5, 0.5, 0.5, 1.0, 1.0,
+	-0.5, 0.5, 0.5, 0.0, 1.0,
+	// Back face
+	-0.5, -0.5, -0.5, 1.0, 0.0,
+	0.5, -0.5, -0.5, 0.0, 0.0,
+	0.5, 0.5, -0.5, 0.0, 1.0,
+	-0.5, 0.5, -0.5, 1.0, 1.0,
+	// Top face
+	-0.5, 0.5, 0.5, 0.0, 0.0,
+	0.5, 0.5, 0.5, 1.0, 0.0,
+	0.5, 0.5, -0.5, 1.0, 1.0,
+	-0.5, 0.5, -0.5, 0.0, 1.0,
+	// Bottom face
+	-0.5, -0.5, 0.5, 0.0, 1.0,
+	0.5, -0.5, 0.5, 1.0, 1.0,
+	0.5, -0.5, -0.5, 1.0, 0.0,
+	-0.5, -0.5, -0.5, 0.0, 0.0,
+	// Right face
+	0.5, -0.5, 0.5, 0.0, 0.0,
+	0.5, -0.5, -0.5, 1.0, 0.0,
+	0.5, 0.5, -0.5, 1.0, 1.0,
+	0.5, 0.5, 0.5, 0.0, 1.0,
+	// Left face
+	-0.5, -0.5, 0.5, 1.0, 0.0,
+	-0.5, -0.5, -0.5, 0.0, 0.0,
+	-0.5, 0.5, -0.5, 0.0, 1.0,
+	-0.5, 0.5, 0.5, 1.0, 1.0,
+}
 
-	// Indices for drawing cube edges (wireframe)
-	cubeIndices = []uint32{
-		0, 1, 1, 2, 2, 3, 3, 0, // Front face
-		4, 5, 5, 6, 6, 7, 7, 4, // Back face
-		0, 4, 1, 5, 2, 6, 3, 7, // Connecting lines
-	}
+var cubeIndices = []uint32{
+	0, 1, 2, 2, 3, 0, // Front
+	4, 5, 6, 6, 7, 4, // Back
+	8, 9, 10, 10, 11, 8, // Top
+	12, 13, 14, 14, 15, 12, // Bottom
+	16, 17, 18, 18, 19, 16, // Right
+	20, 21, 22, 22, 23, 20, // Left
+}
+
+// Global state for interaction
+var (
+	cameraDistance = 3.0
+	rotationX      = 0.0
+	rotationY      = 0.0
+	lastMouseX     = 0.0
+	lastMouseY     = 0.0
+	dragging       = false
 )
 
 func main() {
@@ -78,6 +116,11 @@ func main() {
 	}
 	window.MakeContextCurrent()
 
+	// Callbacks
+	window.SetScrollCallback(scrollCallback)
+	window.SetMouseButtonCallback(mouseButtonCallback)
+	window.SetCursorPosCallback(cursorPosCallback)
+
 	if err := gl.Init(); err != nil {
 		panic(err)
 	}
@@ -86,7 +129,7 @@ func main() {
 	fmt.Println("OpenGL version", version)
 
 	// Disable VSync to allow unlimited FPS
-	// glfw.SwapInterval(0)
+	glfw.SwapInterval(0)
 
 	// Compile Shaders
 	program, err := newProgram(vertexShaderSource, fragmentShaderSource)
@@ -97,6 +140,16 @@ func main() {
 
 	// Uniforms
 	mvpUniform := gl.GetUniformLocation(program, gl.Str("mvp\x00"))
+	texUniform := gl.GetUniformLocation(program, gl.Str("tex\x00"))
+	gl.Uniform1i(texUniform, 0) // Texture unit 0
+
+	// Texture
+	texture, err := newTexture()
+	if err != nil {
+		panic(err)
+	}
+	gl.ActiveTexture(gl.TEXTURE0)
+	gl.BindTexture(gl.TEXTURE_2D, texture)
 
 	// VAO / VBO / EBO
 	var vao uint32
@@ -113,9 +166,18 @@ func main() {
 	gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo)
 	gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(cubeIndices)*4, gl.Ptr(cubeIndices), gl.STATIC_DRAW)
 
+	// Attributes (Stride = 5 * 4 bytes)
+	stride := int32(5 * 4)
+
+	// Position (offset 0)
 	vertAttrib := uint32(gl.GetAttribLocation(program, gl.Str("vp\x00")))
 	gl.EnableVertexAttribArray(vertAttrib)
-	gl.VertexAttribPointer(vertAttrib, 3, gl.FLOAT, false, 0, gl.PtrOffset(0))
+	gl.VertexAttribPointer(vertAttrib, 3, gl.FLOAT, false, stride, gl.PtrOffset(0))
+
+	// TexCoord (offset 3*4 = 12)
+	texCoordAttrib := uint32(gl.GetAttribLocation(program, gl.Str("vertTexCoord\x00")))
+	gl.EnableVertexAttribArray(texCoordAttrib)
+	gl.VertexAttribPointer(texCoordAttrib, 2, gl.FLOAT, false, stride, gl.PtrOffset(12))
 
 	// Global settings
 	gl.Enable(gl.DEPTH_TEST)
@@ -124,18 +186,12 @@ func main() {
 
 	// Projection Matrix
 	projection := mgl32.Perspective(mgl32.DegToRad(45.0), float32(width)/float32(height), 0.1, 100.0)
-	camera := mgl32.LookAtV(mgl32.Vec3{3, 3, 3}, mgl32.Vec3{0, 0, 0}, mgl32.Vec3{0, 1, 0})
 
-	angle := 0.0
-	lastFrameTime := glfw.GetTime()
 	lastFpsTime := glfw.GetTime()
 	frameCount := 0
 
 	for !window.ShouldClose() {
-		// Calculate Delta Time
 		currentTime := glfw.GetTime()
-		deltaTime := currentTime - lastFrameTime
-		lastFrameTime = currentTime
 
 		// FPS Counter Update (every 1 second)
 		frameCount++
@@ -149,22 +205,97 @@ func main() {
 
 		gl.UseProgram(program)
 
-		// Rotate Cube (Time-based animation)
-		// Speed: ~1.5 radians per second
-		rotationSpeed := 1.5
-		angle += rotationSpeed * deltaTime
+		// Camera
+		camera := mgl32.LookAtV(
+			mgl32.Vec3{0, 0, float32(cameraDistance)},
+			mgl32.Vec3{0, 0, 0},
+			mgl32.Vec3{0, 1, 0},
+		)
 
-		model := mgl32.HomogRotate3D(float32(angle), mgl32.Vec3{0, 1, 0}).Mul4(mgl32.HomogRotate3D(float32(angle)*0.5, mgl32.Vec3{1, 0, 0}))
+		// Rotation logic
+		model := mgl32.HomogRotate3D(float32(rotationX), mgl32.Vec3{1, 0, 0})
+		model = model.Mul4(mgl32.HomogRotate3D(float32(rotationY), mgl32.Vec3{0, 1, 0}))
 
 		mvp := projection.Mul4(camera).Mul4(model)
 		gl.UniformMatrix4fv(mvpUniform, 1, false, &mvp[0])
 
 		gl.BindVertexArray(vao)
-		gl.DrawElements(gl.LINES, int32(len(cubeIndices)), gl.UNSIGNED_INT, gl.PtrOffset(0))
+		gl.DrawElements(gl.TRIANGLES, int32(len(cubeIndices)), gl.UNSIGNED_INT, gl.PtrOffset(0))
 
 		window.SwapBuffers()
 		glfw.PollEvents()
 	}
+}
+
+func scrollCallback(w *glfw.Window, xoff float64, yoff float64) {
+	cameraDistance -= yoff * 0.5
+	if cameraDistance < 1.0 {
+		cameraDistance = 1.0
+	}
+	if cameraDistance > 20.0 {
+		cameraDistance = 20.0
+	}
+}
+
+func mouseButtonCallback(w *glfw.Window, button glfw.MouseButton, action glfw.Action, mods glfw.ModifierKey) {
+	if button == glfw.MouseButtonLeft {
+		if action == glfw.Press {
+			dragging = true
+			lastMouseX, lastMouseY = w.GetCursorPos()
+		} else {
+			dragging = false
+		}
+	}
+}
+
+func cursorPosCallback(w *glfw.Window, xpos float64, ypos float64) {
+	if dragging {
+		dx := xpos - lastMouseX
+		dy := ypos - lastMouseY
+
+		rotationY += dx * 0.01
+		rotationX += dy * 0.01
+
+		lastMouseX = xpos
+		lastMouseY = ypos
+	}
+}
+
+func newTexture() (uint32, error) {
+	rgba := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	// Checkerboard
+	for x := 0; x < 64; x++ {
+		for y := 0; y < 64; y++ {
+			if (x/8+y/8)%2 == 0 {
+				rgba.Set(x, y, color.White)
+			} else {
+				// Gray
+				rgba.Set(x, y, color.Gray{Y: 128})
+			}
+		}
+	}
+
+	var texture uint32
+	gl.GenTextures(1, &texture)
+	gl.BindTexture(gl.TEXTURE_2D, texture)
+
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT)
+
+	gl.TexImage2D(
+		gl.TEXTURE_2D,
+		0,
+		gl.RGBA,
+		int32(rgba.Rect.Size().X),
+		int32(rgba.Rect.Size().Y),
+		0,
+		gl.RGBA,
+		gl.UNSIGNED_BYTE,
+		gl.Ptr(rgba.Pix))
+
+	return texture, nil
 }
 
 func newProgram(vertexShaderSource, fragmentShaderSource string) (uint32, error) {

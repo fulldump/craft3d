@@ -6,10 +6,17 @@
 * Crear una ventana
 * Iniciar sistema 3D
 
+## Done
+
+* Basic scaffold
+* Crear una ventana
+* Iniciar sistema 3D
+* Pintar un cubo animada
+
 ## ToDo
 
-* Pintar un cubo animada
-* Interactuar con el cubo
+* Añadir texturas
+* Interactuar con el cubo (Teclado/Mouse)
 
 ## Won't do
 
