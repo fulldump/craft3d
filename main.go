@@ -85,6 +85,9 @@ func main() {
 	version := gl.GoStr(gl.GetString(gl.VERSION))
 	fmt.Println("OpenGL version", version)
 
+	// Disable VSync to allow unlimited FPS
+	// glfw.SwapInterval(0)
+
 	// Compile Shaders
 	program, err := newProgram(vertexShaderSource, fragmentShaderSource)
 	if err != nil {
@@ -124,14 +127,33 @@ func main() {
 	camera := mgl32.LookAtV(mgl32.Vec3{3, 3, 3}, mgl32.Vec3{0, 0, 0}, mgl32.Vec3{0, 1, 0})
 
 	angle := 0.0
+	lastFrameTime := glfw.GetTime()
+	lastFpsTime := glfw.GetTime()
+	frameCount := 0
 
 	for !window.ShouldClose() {
+		// Calculate Delta Time
+		currentTime := glfw.GetTime()
+		deltaTime := currentTime - lastFrameTime
+		lastFrameTime = currentTime
+
+		// FPS Counter Update (every 1 second)
+		frameCount++
+		if currentTime-lastFpsTime >= 1.0 {
+			window.SetTitle(fmt.Sprintf("%s | FPS: %d", title, frameCount))
+			frameCount = 0
+			lastFpsTime = currentTime
+		}
+
 		gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 
 		gl.UseProgram(program)
 
-		// Rotate Cube
-		angle += 0.01
+		// Rotate Cube (Time-based animation)
+		// Speed: ~1.5 radians per second
+		rotationSpeed := 1.5
+		angle += rotationSpeed * deltaTime
+
 		model := mgl32.HomogRotate3D(float32(angle), mgl32.Vec3{0, 1, 0}).Mul4(mgl32.HomogRotate3D(float32(angle)*0.5, mgl32.Vec3{1, 0, 0}))
 
 		mvp := projection.Mul4(camera).Mul4(model)
