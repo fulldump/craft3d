@@ -12,11 +12,13 @@
 * Crear una ventana
 * Iniciar sistema 3D
 * Pintar un cubo animada
+* Añadir texturas
+* Interactuar con el cubo (Teclado/Mouse)
+* Crear y destruir cubos (Minecraft-style)
 
 ## ToDo
 
-* Añadir texturas
-* Interactuar con el cubo (Teclado/Mouse)
+* Añadir tipos de bloque y hotbar
 
 ## Won't do
 
