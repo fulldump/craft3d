@@ -1,7 +1,7 @@
 
 
 build:
-	go build -o bin/craft3d main.go
+	GOTOOLCHAIN=local go build -o bin/craft3d main.go
 
 run:
 	go run .
